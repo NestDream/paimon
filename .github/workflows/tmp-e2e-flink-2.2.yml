@@ -1,0 +1,135 @@
+################################################################################
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+# limitations under the License.
+################################################################################
+
+# Temporary. For the scratch branch flink-2.3-support-e2e-2.2 only, not for merge.
+#
+# CI runs the e2e suites with the default Flink version of the flink2 profile
+# (job "Java / E2E / Flink 2", suite e2e-flink2 of tools/ci/run-java-tests.sh).
+# No CI job selects the e2e profiles of the older Flink 2 versions.
+#
+# Job e2e-flink-2-2 is that CI job with the e2e profile flink-2.2 in place of
+# flink-2.3. Job e2e-flink-older does the same with flink-2.1 and flink-2.0.
+#
+# Differences from the CI job (ci-java.yml):
+#   - What run-java-tests.sh runs for the suite e2e-flink2 is written out here,
+#     because the script takes no profile argument: the two Maven commands that
+#     "CI_DRY_RUN=true bash tools/ci/run-java-tests.sh e2e-flink2 2.12 11"
+#     prints, with the profile replaced, and between them the native-library
+#     setup and the random JVM time zone of tools/ci/utils.sh.
+#   - No Maven cache step. Every dependency is downloaded and every Paimon
+#     module is built in the run.
+#   - One more step prints the Flink image of the compose file and the jars
+#     that the containers mount.
+
+name: Temporary / E2E with older Flink 2 profiles
+
+on:
+  push:
+    branches:
+      - flink-2.3-support-e2e-2.2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MAVEN_OPTS: -Xmx4096m -Dmaven.wagon.httpconnectionManager.ttlSeconds=30 -Dmaven.wagon.http.retryHandler.requestSentEnabled=true
+
+jobs:
+  e2e-flink-2-2:
+    name: E2E / Flink 2 / profile flink-2.2
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up JDK 11
+        uses: actions/setup-java@v5
+        with:
+          java-version: 11
+          distribution: temurin
+      - name: Build dependencies and run tests
+        run: |
+          set -euo pipefail
+          mvn -T 2C -B -ntp install -DskipTests -Pflink2,spark3,flink-2.2,java11 -pl paimon-e2e-tests -am
+          . tools/ci/utils.sh
+          jvm_timezone=$(random_timezone)
+          echo "JVM timezone is set to $jvm_timezone"
+          mvn -T 1C -B -ntp test -Pflink2,spark3,flink-2.2,java11 -pl paimon-e2e-tests -Dstyle.color=never -Duser.timezone="$jvm_timezone"
+      - name: Show what was tested
+        if: always()
+        run: |
+          grep -n 'image: apache/flink' paimon-e2e-tests/target/classes/docker-compose.yaml || true
+          ls -l /tmp/paimon-e2e-tests-jars || true
+          sha256sum /tmp/paimon-e2e-tests-jars/paimon-flink.jar paimon-flink/paimon-flink-2.2/target/paimon-flink-2.2-2.2-SNAPSHOT.jar || true
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}}' apache/flink || true
+      - name: Upload failed test reports
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-reports-e2e-flink2-profile-flink-2.2-jdk11-scala2.12
+          path: '**/target/surefire-reports/**'
+          if-no-files-found: ignore
+          retention-days: 7
+
+  e2e-flink-older:
+    name: E2E / Flink 2 / profile ${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      # Keep independent results when one version fails.
+      fail-fast: false
+      matrix:
+        profile: [flink-2.1, flink-2.0]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up JDK 11
+        uses: actions/setup-java@v5
+        with:
+          java-version: 11
+          distribution: temurin
+      - name: Build dependencies and run tests
+        env:
+          E2E_PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          mvn -T 2C -B -ntp install -DskipTests -P"flink2,spark3,${E2E_PROFILE},java11" -pl paimon-e2e-tests -am
+          . tools/ci/utils.sh
+          jvm_timezone=$(random_timezone)
+          echo "JVM timezone is set to $jvm_timezone"
+          mvn -T 1C -B -ntp test -P"flink2,spark3,${E2E_PROFILE},java11" -pl paimon-e2e-tests -Dstyle.color=never -Duser.timezone="$jvm_timezone"
+      - name: Show what was tested
+        if: always()
+        env:
+          E2E_PROFILE: ${{ matrix.profile }}
+        run: |
+          grep -n 'image: apache/flink' paimon-e2e-tests/target/classes/docker-compose.yaml || true
+          ls -l /tmp/paimon-e2e-tests-jars || true
+          sha256sum /tmp/paimon-e2e-tests-jars/paimon-flink.jar "paimon-flink/paimon-${E2E_PROFILE}/target/paimon-${E2E_PROFILE}-2.2-SNAPSHOT.jar" || true
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}}' apache/flink || true
+      - name: Upload failed test reports
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-reports-e2e-flink2-profile-${{ matrix.profile }}-jdk11-scala2.12
+          path: '**/target/surefire-reports/**'
+          if-no-files-found: ignore
+          retention-days: 7
